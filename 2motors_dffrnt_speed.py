@@ -1,92 +1,51 @@
-# TB6612FNG Dual Motor Speed Test
-# Raspberry Pi BOARD pin mode
+# Servo Motor Test - Left, Center, Right
+# SG5010 servo on GPIO 13 (pin 33)
+# Raspberry Pi 5 - using lgpio directly
+import lgpio
 from time import sleep
-import RPi.GPIO as GPIO
-GPIO.setmode(GPIO.BOARD)
-GPIO.setwarnings(False)
 
-# Pins - Motor A
-PWMA = 12
-AIN2 = 18
-AIN1 = 16
-# Pins - Motor B
-PWMB = 11
-BIN1 = 15
-BIN2 = 13
-# Shared
-STBY = 22
+SERVO  = 13  # BCM numbering
+CENTER = 90
+FREQ   = 50  # 50Hz
 
-# Setup pins - Motor A
-GPIO.setup(PWMA, GPIO.OUT)
-GPIO.setup(AIN1, GPIO.OUT)
-GPIO.setup(AIN2, GPIO.OUT)
-# Setup pins - Motor B
-GPIO.setup(PWMB, GPIO.OUT)
-GPIO.setup(BIN1, GPIO.OUT)
-GPIO.setup(BIN2, GPIO.OUT)
-# Shared
-GPIO.setup(STBY, GPIO.OUT)
+h = lgpio.gpiochip_open(0)
+lgpio.gpio_claim_output(h, SERVO)
 
-# PWM setup
-pwmFreq = 100
-pwma = GPIO.PWM(PWMA, pwmFreq)
-pwmb = GPIO.PWM(PWMB, pwmFreq)
+def set_relative(degrees):
+    """Positive = right, Negative = left"""
+    angle = CENTER + degrees
+    # SG5010: 1ms to 2ms pulse width
+    pulse_us = 1000 + (angle / 180.0) * 1000
+    lgpio.tx_pwm(h, SERVO, FREQ, pulse_us / 10000 * 100)
+    sleep(0.8)
 
-# Start PWM at 0%
-pwma.start(0)
-pwmb.start(0)
-
-def set_motors(a_dir, b_dir, duty):
-    """Set both motors. dir: 'fwd', 'rev', or 'stop'"""
-    # Motor A
-    if a_dir == 'fwd':
-        GPIO.output(AIN1, GPIO.HIGH); GPIO.output(AIN2, GPIO.LOW)
-    elif a_dir == 'rev':
-        GPIO.output(AIN1, GPIO.LOW);  GPIO.output(AIN2, GPIO.HIGH)
-    else:
-        GPIO.output(AIN1, GPIO.LOW);  GPIO.output(AIN2, GPIO.LOW)
-    # Motor B
-    if b_dir == 'fwd':
-        GPIO.output(BIN1, GPIO.HIGH); GPIO.output(BIN2, GPIO.LOW)
-    elif b_dir == 'rev':
-        GPIO.output(BIN1, GPIO.LOW);  GPIO.output(BIN2, GPIO.HIGH)
-    else:
-        GPIO.output(BIN1, GPIO.LOW);  GPIO.output(BIN2, GPIO.LOW)
-
-    pwma.ChangeDutyCycle(duty)
-    pwmb.ChangeDutyCycle(duty)
+def center():
+    set_relative(0)
 
 try:
-    GPIO.output(STBY, GPIO.HIGH)
-
-# FORWARD TEST
-    print("Forward - 25% speed")
-    set_motors('fwd', 'fwd', 25)
-    sleep(3)
-
-    print("Forward - 50% speed")
-    set_motors('fwd', 'fwd', 50)
-    sleep(3)
-
-    # STOP
-    print("Stop")
-    set_motors('stop', 'stop', 0)
+    print("Center")
+    center()
     sleep(2)
 
-    # REVERSE TEST
-    print("Reverse - 25% speed")
-    set_motors('rev', 'rev', 25)
-    sleep(3)
+    print("Left 45°")
+    set_relative(-45)
+    sleep(2)
 
-    print("Reverse - 50% speed")
-    set_motors('rev', 'rev', 50)
-    sleep(3)
+    print("Center")
+    center()
+    sleep(2)
+
+    print("Right 45°")
+    set_relative(45)
+    sleep(2)
+
+    print("Center")
+    center()
+    sleep(2)
 
 except KeyboardInterrupt:
-    print("Stopped by user")
+    print("Stopped by user — returning to center")
+    center()
 finally:
-    pwma.stop()
-    pwmb.stop()
-    set_motors('stop', 'stop', 0)
-    GPIO.output(STBY, GPIO.LOW)
-    GPIO.cleanup()
+    lgpio.tx_pwm(h, SERVO, 0, 0)
+    lgpio.gpiochip_close(h)
