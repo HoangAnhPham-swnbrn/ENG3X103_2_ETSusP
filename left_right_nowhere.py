@@ -1,34 +1,44 @@
-from gpiozero import Servo
-from gpiozero.pins.pigpio import PiGPIOFactory
+# Servo Motor Test - Left, Center, Right
+# SG5010 servo on GPIO 13 (pin 33, PWM channel 1)
+# Raspberry Pi 5
+from hardware_pwm import HardwarePWM
 from time import sleep
 
-factory = PiGPIOFactory()
+# GPIO 13 = PWM channel 1, chip=2 for Pi 5
+pwm = HardwarePWM(pwm_channel=1, hz=50, chip=2)
+pwm.start(0)
 
-# GPIO 13 = pin 33
-servo = Servo(13, min_pulse_width=0.5/1000, max_pulse_width=2.5/1000, pin_factory=factory)
+def set_angle(angle):
+    """0° = left, 90° = center, 180° = right"""
+    # SG5010: 1ms (0°) to 2ms (180°) @ 50Hz
+    duty = 5.0 + (angle / 180.0) * 5.0
+    pwm.change_duty_cycle(duty)
+    sleep(0.5)
+    pwm.change_duty_cycle(0)  # cut signal to reduce jitter
 
 try:
     print("Center")
-    servo.mid()
+    set_angle(90)
     sleep(2)
 
     print("Left")
-    servo.min()
+    set_angle(0)
     sleep(2)
 
     print("Center")
-    servo.mid()
+    set_angle(90)
     sleep(2)
 
     print("Right")
-    servo.max()
+    set_angle(180)
     sleep(2)
 
     print("Center")
-    servo.mid()
+    set_angle(90)
     sleep(2)
 
 except KeyboardInterrupt:
     print("Stopped by user")
 finally:
-    servo.detach()
+    pwm.change_duty_cycle(0)
+    pwm.stop()
