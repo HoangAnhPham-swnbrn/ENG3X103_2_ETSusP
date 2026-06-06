@@ -59,45 +59,28 @@ def set_motors(a_dir, b_dir, duty):
 try:
     GPIO.output(STBY, GPIO.HIGH)
 
-    # -------------------------
-    # FORWARD TEST
-    # -------------------------
-    print("Forward - 30% speed")
-    set_motors('fwd', 'fwd', 30)
+# FORWARD TEST
+    print("Forward - 25% speed")
+    set_motors('fwd', 'fwd', 25)
     sleep(3)
 
-    print("Forward - 60% speed")
-    set_motors('fwd', 'fwd', 60)
+    print("Forward - 50% speed")
+    set_motors('fwd', 'fwd', 50)
     sleep(3)
 
-    print("Forward - 100% speed")
-    set_motors('fwd', 'fwd', 100)
-    sleep(3)
-
-    # -------------------------
     # STOP
-    # -------------------------
     print("Stop")
     set_motors('stop', 'stop', 0)
     sleep(2)
 
-    # -------------------------
     # REVERSE TEST
-    # -------------------------
+    print("Reverse - 25% speed")
+    set_motors('rev', 'rev', 25)
+    sleep(3)
+
     print("Reverse - 50% speed")
     set_motors('rev', 'rev', 50)
     sleep(3)
-
-    print("Reverse - 100% speed")
-    set_motors('rev', 'rev', 100)
-    sleep(3)
-
-    # -------------------------
-    # FINAL STOP
-    # -------------------------
-    print("Final Stop")
-    set_motors('stop', 'stop', 0)
-    GPIO.output(STBY, GPIO.LOW)
 
 except KeyboardInterrupt:
     print("Stopped by user")
