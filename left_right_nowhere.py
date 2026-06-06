@@ -7,10 +7,8 @@ from time import sleep
 GPIO.setmode(GPIO.BOARD)
 GPIO.setwarnings(False)
 
-SERVO = 33
+SERVO  = 33
 CENTER = 90
-LEFT   = CENTER - 45  # 45°
-RIGHT  = CENTER + 45  # 135°
 
 GPIO.setup(SERVO, GPIO.OUT)
 
@@ -22,8 +20,12 @@ def set_angle(angle):
     pwm.ChangeDutyCycle(duty)
     sleep(0.8)
 
+def set_relative(degrees):
+    """Positive = right, Negative = left. e.g. -45 = left, +45 = right"""
+    set_angle(CENTER + degrees)
+
 def center():
-    set_angle(CENTER)
+    set_relative(0)
 
 try:
     print("Center")
@@ -31,7 +33,7 @@ try:
     sleep(2)
 
     print("Left 45°")
-    set_angle(LEFT)
+    set_relative(-45)
     sleep(2)
 
     print("Center")
@@ -39,7 +41,7 @@ try:
     sleep(2)
 
     print("Right 45°")
-    set_angle(RIGHT)
+    set_relative(45)
     sleep(2)
 
     print("Center")
@@ -48,7 +50,7 @@ try:
 
 except KeyboardInterrupt:
     print("Stopped by user — returning to center")
-    center()  # always return to center on Ctrl+C
+    center()
 finally:
     pwm.stop()
     GPIO.cleanup()
