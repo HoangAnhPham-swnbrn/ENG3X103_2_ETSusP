@@ -5,7 +5,7 @@ import math
 import threading
 import statistics
 from collections import deque
-from gpiozero import DistanceSensor
+from gpiozero import DistanceSensor, Servo
 from picamera2 import Picamera2
 from ultralytics import YOLO
 import RPi.GPIO as GPIO
@@ -13,19 +13,41 @@ import RPi.GPIO as GPIO
 # ─────────────────────────────────────────────
 # CONSTANTS
 # ─────────────────────────────────────────────
-TRIGGER_PIN     = 5       # BCM GPIO 5  (BOARD pin 29)
-ECHO_PIN        = 6       # BCM GPIO 6  (BOARD pin 31)
-STOP_DISTANCE   = 15      # cm
-SLOW_DISTANCE   = 40      # cm
-MAX_RANGE_CM    = 400
-CONFIRM_FRAMES  = 3       # consecutive readings before state change
-YOLO_CONFIDENCE = 0.55
+TRIGGER_PIN      = 5       # BCM GPIO 5  (BOARD pin 29)
+ECHO_PIN         = 6       # BCM GPIO 6  (BOARD pin 31)
+STOP_DISTANCE    = 15      # cm
+SLOW_DISTANCE    = 40      # cm
+MAX_RANGE_CM     = 400
+CONFIRM_FRAMES   = 3
+YOLO_CONFIDENCE  = 0.55
 
-REVERSE_DURATION = 3.0    # seconds to reverse when stopped too long
-STOP_TOO_LONG    = 4.0    # seconds stopped before triggering reverse
+STOP_TOO_LONG    = 4.0     # seconds stopped before escape manoeuvre triggers
 
 WIDTH  = 1400
 HEIGHT = 800
+
+# ─────────────────────────────────────────────
+# SERVO  (BCM GPIO 12 = BOARD pin 32)
+# ─────────────────────────────────────────────
+SERVO_PIN = 12   # BCM — different physical pin from motor PWMA (BOARD 12)
+
+servo = Servo(
+    SERVO_PIN,
+    min_pulse_width=0.0005,
+    max_pulse_width=0.0025
+)
+
+def steer(angle_deg, settle=1.5):
+    """Move servo to angle (0–180°) and wait for it to settle."""
+    servo.value = (angle_deg / 90.0) - 1.0
+    time.sleep(settle)
+
+def steer_centre(settle=1.0):  steer(90,  settle)
+def steer_right(settle=1.0):   steer(150, settle)
+def steer_left(settle=1.0):    steer(30,  settle)
+
+# Centre on startup
+steer_centre(settle=0.5)
 
 # ─────────────────────────────────────────────
 # MOTOR DRIVER  (TB6612FNG — BOARD pin mode)
@@ -34,7 +56,7 @@ GPIO.setmode(GPIO.BOARD)
 GPIO.setwarnings(False)
 
 # Motor A
-PWMA = 12
+PWMA = 12    # BOARD pin 12  ≠  BCM GPIO 12
 AIN1 = 16
 AIN2 = 18
 # Motor B
@@ -51,11 +73,9 @@ pwma = GPIO.PWM(PWMA, 100)
 pwmb = GPIO.PWM(PWMB, 100)
 pwma.start(0)
 pwmb.start(0)
-
-GPIO.output(STBY, GPIO.HIGH)   # take driver out of standby immediately
+GPIO.output(STBY, GPIO.HIGH)
 
 def _set_motors(a_dir, b_dir, duty):
-    """Low-level motor setter. dir: 'fwd' | 'rev' | 'stop'"""
     if a_dir == 'fwd':
         GPIO.output(AIN1, GPIO.HIGH); GPIO.output(AIN2, GPIO.LOW)
     elif a_dir == 'rev':
@@ -74,7 +94,6 @@ def _set_motors(a_dir, b_dir, duty):
     pwmb.ChangeDutyCycle(duty)
 
 def apply_speed(speed_level):
-    """Map dashboard speed level to motor output."""
     if speed_level == 'FAST':
         _set_motors('fwd', 'fwd', 100)
     elif speed_level == 'SLOW':
@@ -82,11 +101,60 @@ def apply_speed(speed_level):
     else:
         _set_motors('stop', 'stop', 0)
 
-def do_reverse():
-    """Reverse at 50% for REVERSE_DURATION seconds (blocking — run in thread)."""
-    _set_motors('rev', 'rev', 50)
-    time.sleep(REVERSE_DURATION)
+
+# ─────────────────────────────────────────────
+# ESCAPE MANOEUVRE
+# Sequence:
+#   1. Reverse straight  — 100%, 3 s
+#   2. Steer right       — 150°
+#   3. Forward curve     — 50%,  2 s  (curving right)
+#   4. Steer left        — 30°
+#   5. Forward straighten— 50%,  1 s  (curving left)
+#   6. Centre servo      — 90°
+#   7. Stop → hand back to normal control
+# ─────────────────────────────────────────────
+
+# Human-readable label shown on the dashboard during each step
+_escape_phase = ""
+
+def _escape_sequence():
+    """Runs in a daemon thread. Updates _escape_phase so the UI can show progress."""
+    global _escape_phase, reversing
+
+    # 1 — Reverse straight
+    _escape_phase = "Reversing..."
+    steer_centre(settle=0.3)
+    _set_motors('rev', 'rev', 100)
+    time.sleep(3.0)
     _set_motors('stop', 'stop', 0)
+
+    # 2 — Steer right
+    _escape_phase = "Steering right"
+    steer_right(settle=1.0)
+
+    # 3 — Forward curve right
+    _escape_phase = "Curving right"
+    _set_motors('fwd', 'fwd', 50)
+    time.sleep(2.0)
+    _set_motors('stop', 'stop', 0)
+
+    # 4 — Steer left
+    _escape_phase = "Steering left"
+    steer_left(settle=1.0)
+
+    # 5 — Forward straighten
+    _escape_phase = "Straightening"
+    _set_motors('fwd', 'fwd', 50)
+    time.sleep(1.0)
+    _set_motors('stop', 'stop', 0)
+
+    # 6 — Centre
+    _escape_phase = "Centring"
+    steer_centre(settle=0.8)
+
+    # Done — hand control back
+    _escape_phase = ""
+    reversing = False
 
 
 # ─────────────────────────────────────────────
@@ -154,23 +222,21 @@ def _camera_loop():
         frame   = picam2.capture_array()
         frame   = cv2.rotate(frame, cv2.ROTATE_180)
         results = model(frame, verbose=False, imgsz=320)
-
-        person = False
-        names  = []
+        person  = False
+        names   = []
         for result in results:
             for box in result.boxes:
                 cls  = int(box.cls[0])
                 conf = float(box.conf[0])
                 if cls in TRAFFIC_CLASSES and conf > YOLO_CONFIDENCE:
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    x1,y1,x2,y2 = map(int, box.xyxy[0])
                     label = TRAFFIC_CLASSES[cls]
                     names.append(label)
                     if cls == 0:
                         person = True
-                    cv2.rectangle(frame, (x1,y1),(x2,y2), COLORS[cls], 2)
-                    cv2.putText(frame, f"{label} {conf:.2f}", (x1, y1-8),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, COLORS[cls], 1)
-
+                    cv2.rectangle(frame,(x1,y1),(x2,y2),COLORS[cls],2)
+                    cv2.putText(frame,f"{label} {conf:.2f}",(x1,y1-8),
+                                cv2.FONT_HERSHEY_SIMPLEX,0.45,COLORS[cls],1)
         with _frame_lock:
             latest_frame          = frame
             latest_person         = person
@@ -193,20 +259,19 @@ canvas.pack()
 # ─────────────────────────────────────────────
 # STATE
 # ─────────────────────────────────────────────
-road_offset      = 0
-side_offset      = 0
-stop_until       = 0          # forced-stop timer (obstacle approach)
-stopped_since    = None       # when we first entered STOP (for reverse trigger)
-reversing        = False      # True while reverse thread is running
-camera_img       = None
+road_offset   = 0
+side_offset   = 0
+stop_until    = 0
+stopped_since = None
+reversing     = False     # True for entire escape sequence duration
+camera_img    = None
 
 
 # ─────────────────────────────────────────────
-# LOGIC
+# STATUS LOGIC
 # ─────────────────────────────────────────────
 def get_status(distance, person_detected, forced_stop=False):
     global consecutive_stop, consecutive_clear
-
     if distance is None:
         return "ERROR", "#94a3b8", "Sensor error", 0, "STOP"
 
@@ -229,12 +294,11 @@ def get_status(distance, person_detected, forced_stop=False):
         return "STOP", "#ff3b30", "Object close",  0, "STOP"
     if distance < SLOW_DISTANCE:
         return "SLOW", "#ffd60a", "Object nearby", 25, "SLOW"
-
     return "FAST", "#30ff5a", "Path clear", 60, "FAST"
 
 
 # ─────────────────────────────────────────────
-# DRAW HELPERS  (unchanged from previous version)
+# DRAW HELPERS
 # ─────────────────────────────────────────────
 def draw_panel(x1, y1, x2, y2, title="", outline="#164e63", fill="#06111f"):
     canvas.create_rectangle(x1, y1, x2, y2, fill=fill, outline=outline, width=2)
@@ -244,8 +308,8 @@ def draw_panel(x1, y1, x2, y2, title="", outline="#164e63", fill="#06111f"):
 
 def draw_header():
     canvas.create_rectangle(0, 0, WIDTH, 85, fill="#050910", outline="#0f172a")
-    canvas.create_text(70,  42, text="18:40",             fill="white",   font=("Arial", 20, "bold"))
-    canvas.create_text(155, 42, text="Melbourne · 24°C",  fill="#94a3b8", font=("Arial", 12))
+    canvas.create_text(70,  42, text="18:40",            fill="white",   font=("Arial", 20, "bold"))
+    canvas.create_text(155, 42, text="Melbourne · 24°C", fill="#94a3b8", font=("Arial", 12))
     canvas.create_text(WIDTH//2, 42, text="AUTONOMOUS NAVIGATION DASHBOARD",
                        fill="white", font=("Arial", 24, "bold"))
     canvas.create_oval(1210, 33, 1225, 48, fill="#22c55e", outline="")
@@ -261,17 +325,15 @@ def draw_vertical_gauge(cx, cy, rx, ry, value, max_value, title, unit, color, su
     canvas.create_arc(cx-rx+35, cy-ry+95, cx+rx-35, cy+ry-95,
                       start=145, extent=-260*pct, outline=color, width=10, style="arc")
     for i in range(11):
-        angle = math.radians(145 - (260*i/10))
-        x1 = cx + (rx-70) * math.cos(angle)
-        y1 = cy - 20 - (ry-130) * math.sin(angle)
-        x2 = cx + (rx-55) * math.cos(angle)
-        y2 = cy - 20 - (ry-115) * math.sin(angle)
+        angle = math.radians(145-(260*i/10))
+        x1 = cx+(rx-70)*math.cos(angle);  y1 = cy-20-(ry-130)*math.sin(angle)
+        x2 = cx+(rx-55)*math.cos(angle);  y2 = cy-20-(ry-115)*math.sin(angle)
         canvas.create_line(x1, y1, x2, y2, fill="#64748b", width=1)
-    canvas.create_text(cx, cy-15,  text=str(value),  fill="white",   font=("Arial", 54, "bold"))
-    canvas.create_text(cx, cy+55,  text=unit,        fill="#cbd5e1", font=("Arial", 17))
+    canvas.create_text(cx, cy-15,  text=str(value), fill="white",   font=("Arial", 54, "bold"))
+    canvas.create_text(cx, cy+55,  text=unit,       fill="#cbd5e1", font=("Arial", 17))
     canvas.create_rectangle(cx-44, cy+92, cx+44, cy+122, outline=color, fill="#0a1724", width=1)
-    canvas.create_text(cx, cy+107, text=subtitle,    fill=color,     font=("Arial", 13, "bold"))
-    canvas.create_text(cx, cy+170, text=title,       fill="#38bdf8", font=("Arial", 13, "bold"))
+    canvas.create_text(cx, cy+107, text=subtitle,   fill=color,     font=("Arial", 13, "bold"))
+    canvas.create_text(cx, cy+170, text=title,      fill="#38bdf8", font=("Arial", 13, "bold"))
 
 def draw_tree(x, y, scale):
     canvas.create_rectangle(x-7*scale, y, x+7*scale, y+55*scale, fill="#4b2e16", outline="")
@@ -293,64 +355,63 @@ def draw_navigation_view(moving, speed_level, color, status):
     canvas.create_rectangle(340, 155, 1060, 240, fill="#07111d", outline="")
     for x, y in [(380,175),(520,185),(640,168),(810,178),(970,170),(880,160)]:
         canvas.create_oval(x, y, x+2, y+2, fill="#64748b", outline="")
-    canvas.create_polygon(340,240,410,205,480,235,540,210,640,240,  fill="#0f172a", outline="")
-    canvas.create_polygon(830,240,930,210,1010,230,1060,205,1060,240,fill="#0f172a", outline="")
+    canvas.create_polygon(340,240,410,205,480,235,540,210,640,240, fill="#0f172a",outline="")
+    canvas.create_polygon(830,240,930,210,1010,230,1060,205,1060,240,fill="#0f172a",outline="")
     for i in range(20):
-        y = 240+i*22
-        canvas.create_line(340, y, 1060, y, fill="#073047", width=1)
+        canvas.create_line(340, 240+i*22, 1060, 240+i*22, fill="#073047", width=1)
     for i in range(16):
-        x = 340+i*50
-        canvas.create_line(x, 240, 700, 685, fill="#073047", width=1)
+        canvas.create_line(340+i*50, 240, 700, 685, fill="#073047", width=1)
     canvas.create_polygon(630,240,770,240,1060,685,340,685,
-                          fill="#102132", outline="#38bdf8", width=2)
-    canvas.create_line(630,240,340,685, fill="#93c5fd", width=3)
-    canvas.create_line(770,240,1060,685,fill="#93c5fd", width=3)
+                          fill="#102132",outline="#38bdf8",width=2)
+    canvas.create_line(630,240,340,685, fill="#93c5fd",width=3)
+    canvas.create_line(770,240,1060,685,fill="#93c5fd",width=3)
     for i in range(18):
         y     = 255+((i*45+road_offset)%420)
         scale = (y-240)/445
-        canvas.create_line(630-290*scale, y, 770+290*scale, y, fill="#164e63", width=1)
+        canvas.create_line(630-290*scale,y,770+290*scale,y,fill="#164e63",width=1)
     for i in range(12):
         y     = 255+((i*65+road_offset)%410)
         scale = (y-240)/445
-        canvas.create_line(700, y, 700, y+35*scale, fill="#e0f2fe", width=max(2,int(4*scale)))
+        canvas.create_line(700,y,700,y+35*scale,fill="#e0f2fe",width=max(2,int(4*scale)))
     for i in range(7):
         y     = 265+((i*85+side_offset)%360)
         scale = max(0.18,(y-230)/430)
         lx    = 605-260*scale; rx = 795+260*scale
         if y < 620:
-            draw_tree(lx, y, scale); draw_tree(rx, y, scale)
+            draw_tree(lx,y,scale); draw_tree(rx,y,scale)
         if i%3==0 and y<600:
-            draw_house(lx-55*scale, y+20*scale, scale)
-            draw_house(rx+55*scale, y+20*scale, scale)
+            draw_house(lx-55*scale,y+20*scale,scale)
+            draw_house(rx+55*scale,y+20*scale,scale)
     canvas.create_polygon(620,550,780,550,745,300,655,300,
                           fill="#22c55e",stipple="gray50",outline="#22c55e",width=1)
     canvas.create_polygon(640,405,760,405,735,285,665,285,
                           fill="#f59e0b",stipple="gray50",outline="#f59e0b",width=1)
     canvas.create_polygon(660,335,740,335,725,255,675,255,
                           fill="#ef4444",stipple="gray50",outline="#ef4444",width=1)
-    canvas.create_text(700, 355, text=status+" ZONE", fill=color, font=("Arial", 18, "bold"))
-    draw_car(700, 590)
+    canvas.create_text(700,355,text=status+" ZONE",fill=color,font=("Arial",18,"bold"))
+    draw_car(700,590)
     if moving:
         if speed_level == "FAST":  road_offset += 35; side_offset += 48
         elif speed_level == "SLOW":road_offset += 12; side_offset += 18
+        elif speed_level == "REV": road_offset -= 20; side_offset -= 28
 
 def draw_car(cx, cy):
-    canvas.create_oval(cx-175,cy+65,cx+175,cy+112, fill="#020617", outline="")
+    canvas.create_oval(cx-175,cy+65,cx+175,cy+112,fill="#020617",outline="")
     canvas.create_polygon(cx-145,cy+40,cx-120,cy-55,cx-70,cy-115,cx+70,cy-115,
                           cx+120,cy-55,cx+145,cy+40,cx+110,cy+85,cx-110,cy+85,
-                          fill="#e5e7eb", outline="#f8fafc", width=2)
+                          fill="#e5e7eb",outline="#f8fafc",width=2)
     canvas.create_polygon(cx-70,cy-95,cx+70,cy-95,cx+95,cy-15,cx-95,cy-15,
-                          fill="#020617", outline="#38bdf8", width=2)
+                          fill="#020617",outline="#38bdf8",width=2)
     canvas.create_polygon(cx-110,cy+0,cx+110,cy+0,cx+85,cy+48,cx-85,cy+48,
-                          fill="#111827", outline="#334155", width=2)
-    canvas.create_rectangle(cx-130,cy+46,cx+130,cy+57, fill="#7f1d1d", outline="")
-    canvas.create_rectangle(cx-135,cy+42,cx-65,cy+58,  fill="#ef4444", outline="")
-    canvas.create_rectangle(cx+65,cy+42,cx+135,cy+58,  fill="#ef4444", outline="")
+                          fill="#111827",outline="#334155",width=2)
+    canvas.create_rectangle(cx-130,cy+46,cx+130,cy+57,fill="#7f1d1d",outline="")
+    canvas.create_rectangle(cx-135,cy+42,cx-65,cy+58, fill="#ef4444",outline="")
+    canvas.create_rectangle(cx+65,cy+42,cx+135,cy+58, fill="#ef4444",outline="")
 
 def draw_camera_feed(frame):
     global camera_img
     px1,py1,px2,py2 = 875,130,1075,325
-    canvas.create_rectangle(px1,py1,px2,py2, fill="#020711",outline="#38bdf8",width=3)
+    canvas.create_rectangle(px1,py1,px2,py2,fill="#020711",outline="#38bdf8",width=3)
     canvas.create_rectangle(px1+6,py1+6,px2-6,py2-6,fill="#06111f",outline="#f472b6",width=2)
     canvas.create_text(px1+16,py1+22,text="YOLO CAMERA",fill="#38bdf8",
                        font=("Arial",10,"bold"),anchor="w")
@@ -358,62 +419,76 @@ def draw_camera_feed(frame):
                        font=("Arial",10,"bold"),anchor="e")
     if frame is not None:
         resized = cv2.resize(frame,(190,140))
-        ok, encoded = cv2.imencode(".ppm", resized)
+        ok,encoded = cv2.imencode(".ppm",resized)
         if ok:
             camera_img = tk.PhotoImage(data=encoded.tobytes())
-            canvas.create_image((px1+px2)//2, py1+115, image=camera_img)
+            canvas.create_image((px1+px2)//2,py1+115,image=camera_img)
 
-def draw_bottom_status(status, color, message, detected_names, reversing):
-    canvas.create_rectangle(360,640,1040,700, fill="#020711",outline="#38bdf8",width=2)
+def draw_bottom_status(status, color, message, detected_names):
+    # During escape, _escape_phase overrides message
+    display_msg    = _escape_phase if reversing and _escape_phase else message
+    display_status = "ESCAPE" if reversing else status
+    display_color  = "#a78bfa" if reversing else color
+
+    canvas.create_rectangle(360,640,1040,700,fill="#020711",outline="#38bdf8",width=2)
+
     canvas.create_text(400,670,text="◎",fill="#86efac",font=("Arial",28,"bold"))
     canvas.create_text(445,660,text="DETECTED OBJECT",fill="#cbd5e1",
                        font=("Arial",10,"bold"),anchor="w")
     canvas.create_text(445,684,text=detected_names,fill="#86efac",
                        font=("Arial",13,"bold"),anchor="w")
-    canvas.create_line(585,650,585,690, fill="#1e293b")
+
+    canvas.create_line(585,650,585,690,fill="#1e293b")
+
     canvas.create_text(630,670,text="⬟",fill="#f59e0b",font=("Arial",26,"bold"))
     canvas.create_text(675,660,text="DECISION",fill="#cbd5e1",
                        font=("Arial",10,"bold"),anchor="w")
-    # Show REVERSE in the decision slot when reversing
-    rev_color = "#a78bfa" if reversing else color
-    rev_text  = "REVERSE" if reversing else status
-    canvas.create_text(675,684,text=rev_text,fill=rev_color,
+    canvas.create_text(675,684,text=display_status,fill=display_color,
                        font=("Arial",13,"bold"),anchor="w")
-    canvas.create_line(805,650,805,690, fill="#1e293b")
+
+    canvas.create_line(805,650,805,690,fill="#1e293b")
+
     canvas.create_text(850,670,text="⌘",fill="#38bdf8",font=("Arial",26,"bold"))
     canvas.create_text(895,660,text="STATUS",fill="#cbd5e1",
                        font=("Arial",10,"bold"),anchor="w")
-    msg_text  = "Reversing..." if reversing else message
-    canvas.create_text(895,684,text=msg_text,fill="#38bdf8",
+    canvas.create_text(895,684,text=display_msg,fill="#38bdf8",
                        font=("Arial",13,"bold"),anchor="w")
 
-def draw_dashboard(frame, detected_names, distance, status, color, message,
-                   speed, speed_level, reversing):
+def draw_dashboard(frame, detected_names, distance, status, color, message, speed, speed_level):
     canvas.delete("all")
     draw_header()
-    moving = speed_level != "STOP" or reversing
+
+    # While escaping, scroll road backwards/sideways
+    esc_level  = "REV" if (_escape_phase in ("Reversing...",)) else \
+                 "SLOW" if reversing else speed_level
+    moving     = reversing or speed_level != "STOP"
+    gauge_color = "#a78bfa" if reversing else color
+    spd_label  = _escape_phase[:4].upper() if reversing else \
+                 ("FAST" if speed==60 else ("SLOW" if speed==25 else "STOP"))
 
     # Left gauge
-    canvas.create_rectangle(35,125,295,725, fill="#06111f",outline="#164e63",width=2)
+    canvas.create_rectangle(35,125,295,725,fill="#06111f",outline="#164e63",width=2)
     canvas.create_text(165,175,text="SPEED",fill="#e5e7eb",font=("Arial",14,"bold"))
-    display_speed = 25 if reversing else speed
-    speed_label   = "REV" if reversing else ("FAST" if speed==60 else ("SLOW" if speed==25 else "STOP"))
-    gauge_color   = "#a78bfa" if reversing else color
-    draw_vertical_gauge(cx=165,cy=390,rx=95,ry=175,value=display_speed,max_value=100,
-                        title="DRIVE MODE",unit="km/h",color=gauge_color,subtitle=speed_label)
+    draw_vertical_gauge(cx=165,cy=390,rx=95,ry=175,
+                        value=50 if reversing else speed, max_value=100,
+                        title="DRIVE MODE",unit="km/h",
+                        color=gauge_color,subtitle=spd_label)
     canvas.create_text(165,675,text="AUTONOMOUS",fill="#38bdf8",font=("Arial",13,"bold"))
 
-    draw_navigation_view(moving, "SLOW" if reversing else speed_level, gauge_color, status)
+    draw_navigation_view(moving, esc_level, gauge_color, status)
     draw_camera_feed(frame)
-    draw_bottom_status(status, color, message, detected_names, reversing)
+    draw_bottom_status(status, color, message, detected_names)
 
     # Right gauge
-    canvas.create_rectangle(1105,125,1365,725, fill="#06111f",outline="#164e63",width=2)
+    canvas.create_rectangle(1105,125,1365,725,fill="#06111f",outline="#164e63",width=2)
     canvas.create_text(1235,175,text="DISTANCE",fill="#e5e7eb",font=("Arial",14,"bold"))
     display_dist = 0 if distance is None else int(distance)
-    dist_label   = "SAFE" if display_dist>=SLOW_DISTANCE else ("SLOW" if display_dist>=STOP_DISTANCE else "STOP")
-    draw_vertical_gauge(cx=1235,cy=390,rx=95,ry=175,value=min(display_dist,400),max_value=400,
-                        title="ULTRASONIC",unit="cm",color=gauge_color,subtitle=dist_label)
+    dist_label   = "SAFE" if display_dist>=SLOW_DISTANCE else \
+                   ("SLOW" if display_dist>=STOP_DISTANCE else "STOP")
+    draw_vertical_gauge(cx=1235,cy=390,rx=95,ry=175,
+                        value=min(display_dist,400),max_value=400,
+                        title="ULTRASONIC",unit="cm",
+                        color=gauge_color,subtitle=dist_label)
     canvas.create_text(1235,650,text="ULTRASONIC SENSOR",fill="#cbd5e1",font=("Arial",12,"bold"))
     canvas.create_text(1235,680,text=f"{display_dist} cm",fill=gauge_color,font=("Arial",18,"bold"))
 
@@ -432,40 +507,32 @@ def update():
         person         = latest_person
         detected_names = latest_detected_names
 
-    # ── Forced-stop timer (obstacle approach) ──
+    # Forced-stop timer (obstacle approach)
     was_in_stop = now < stop_until
     if distance < STOP_DISTANCE and not was_in_stop:
         stop_until = now + 3
     forced_stop = now < stop_until
 
-    # ── Determine status ───────────────────────
     status, color, message, speed, speed_level = get_status(distance, person, forced_stop)
 
-    # ── Reverse logic ──────────────────────────
+    # Escape manoeuvre trigger
     if not reversing:
         if speed_level == "STOP":
             if stopped_since is None:
                 stopped_since = now
             elif now - stopped_since >= STOP_TOO_LONG:
-                # Kick off reverse in background so UI doesn't freeze
                 reversing     = True
                 stopped_since = None
-                def _rev():
-                    global reversing
-                    do_reverse()
-                    reversing = False
-                threading.Thread(target=_rev, daemon=True).start()
+                threading.Thread(target=_escape_sequence, daemon=True).start()
         else:
-            stopped_since = None   # reset as soon as we're moving again
+            stopped_since = None
 
-    # ── Drive motors ───────────────────────────
+    # Motor control
     if not reversing:
         apply_speed(speed_level)
-    # (motors are already being controlled by do_reverse() in the thread)
+    # Motors are driven directly by _escape_sequence() while reversing
 
-    # ── Draw ───────────────────────────────────
-    draw_dashboard(frame, detected_names, distance, status, color, message,
-                   speed, speed_level, reversing)
+    draw_dashboard(frame, detected_names, distance, status, color, message, speed, speed_level)
 
     root.after(80, update)
 
@@ -479,6 +546,7 @@ def on_close():
     pwma.stop()
     pwmb.stop()
     GPIO.cleanup()
+    servo.value = None
     picam2.stop()
     cv2.destroyAllWindows()
     root.destroy()
