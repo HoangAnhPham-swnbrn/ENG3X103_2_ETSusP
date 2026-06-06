@@ -1,50 +1,34 @@
-# Servo Motor Test - Left, Center, Right
-# Raspberry Pi BOARD pin mode
+from gpiozero import Servo
+from gpiozero.pins.pigpio import PiGPIOFactory
 from time import sleep
-import RPi.GPIO as GPIO
 
-GPIO.setmode(GPIO.BOARD)
-GPIO.setwarnings(False)
+factory = PiGPIOFactory()
 
-# Pin
-SERVO = 32  # GPIO 12, hardware PWM
-
-GPIO.setup(SERVO, GPIO.OUT)
-
-# Servo PWM at 50Hz
-servo = GPIO.PWM(SERVO, 50)
-servo.start(0)
-
-def set_angle(angle):
-    """Convert angle to duty cycle. 0° = left, 90° = center, 180° = right"""
-    duty = 2.5 + (angle / 180.0) * 10.0
-    servo.ChangeDutyCycle(duty)
-    sleep(0.3)           # let servo settle
-    servo.ChangeDutyCycle(0)  # stop sending pulses to reduce jitter
+# GPIO 13 = pin 33
+servo = Servo(13, min_pulse_width=0.5/1000, max_pulse_width=2.5/1000, pin_factory=factory)
 
 try:
     print("Center")
-    set_angle(90)
+    servo.mid()
     sleep(2)
 
     print("Left")
-    set_angle(0)
+    servo.min()
     sleep(2)
 
     print("Center")
-    set_angle(90)
+    servo.mid()
     sleep(2)
 
     print("Right")
-    set_angle(180)
+    servo.max()
     sleep(2)
 
     print("Center")
-    set_angle(90)
+    servo.mid()
     sleep(2)
 
 except KeyboardInterrupt:
     print("Stopped by user")
 finally:
-    servo.stop()
-    GPIO.cleanup()
+    servo.detach()
