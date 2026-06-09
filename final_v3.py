@@ -18,7 +18,7 @@ ECHO_PIN         = 6        # BCM GPIO 6  (BOARD pin 31)
 STOP_DISTANCE    = 15       # cm
 SLOW_DISTANCE    = 40       # cm
 MAX_RANGE_CM     = 400
-CONFIRM_FRAMES   = 3
+CONFIRM_FRAMES   = 1       # faster state transition — YOLO already sees the object
 YOLO_CONFIDENCE  = 0.55
 
 FRAME_W          = 320
@@ -111,20 +111,20 @@ def _dodge_sequence(side):
 
     if side == "LEFT":
         _escape_phase = "Dodge: steer RIGHT"
-        steer_right(settle=1.2)
+        steer_right(settle=0.8)
 
         _escape_phase = "Dodge: steer LEFT"
-        steer_left(settle=1.2)
+        steer_left(settle=0.8)
 
     else:
         _escape_phase = "Dodge: steer LEFT"
-        steer_left(settle=1.2)
+        steer_left(settle=0.8)
 
         _escape_phase = "Dodge: steer RIGHT"
-        steer_right(settle=1.2)
+        steer_right(settle=0.8)
 
     _escape_phase = "Centring"
-    steer_centre(settle=0.8)
+    steer_centre(settle=0.6)
 
     _escape_phase = ""
     _maneuvering  = False
@@ -195,7 +195,7 @@ def get_distance():
 # ─────────────────────────────────────────────
 # YOLO + CAMERA  (background thread)
 # ─────────────────────────────────────────────
-model = YOLO("yolov8n.pt")
+model = YOLO("yolo11n.pt")   # YOLO11 nano — faster & more accurate than YOLOv8n
 
 TRAFFIC_CLASSES = {
     0: "person", 1: "bicycle", 2: "car", 3: "motorcycle",
@@ -586,9 +586,9 @@ def update():
         detected_names = latest_detected_names
         object_side    = latest_object_side
 
-    # Forced-stop timer (obstacle approach — 3 s debounce)
+    # Forced-stop timer — skip debounce if YOLO already has a side reading
     was_in_stop = now < stop_until
-    if distance < STOP_DISTANCE and not was_in_stop:
+    if distance < STOP_DISTANCE and not was_in_stop and object_side not in ("LEFT", "RIGHT"):
         stop_until = now + 3
     forced_stop = now < stop_until
 
@@ -607,14 +607,16 @@ def update():
             centre_since = None
 
     # ── Side dodge / fallback reverse ────────────
+    # Dodge triggers on SLOW or STOP (not just STOP) for faster reaction
     if not _maneuvering:
-        if speed_level == "STOP":
+        if speed_level in ("SLOW", "STOP"):
             if stopped_since is None:
                 stopped_since = now
             else:
                 elapsed = now - stopped_since
 
-                if object_side in ("LEFT", "RIGHT") and elapsed >= 1.0:
+                # 0.3 s stability delay — just enough for a consistent side reading
+                if object_side in ("LEFT", "RIGHT") and elapsed >= 0.3:
                     _maneuvering  = True
                     stopped_since = None
                     captured_side = object_side
