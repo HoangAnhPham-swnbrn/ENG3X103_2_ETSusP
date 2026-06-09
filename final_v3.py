@@ -110,17 +110,21 @@ def _dodge_sequence(side):
         # Object left → dodge right
         _escape_phase = "Dodge: steer RIGHT"
         steer_right(settle=1.2)
+        time.sleep(2.0)
 
         _escape_phase = "Dodge: steer LEFT"
         steer_left(settle=1.2)
+        time.sleep(2.0)
 
     else:
         # Object right (or centre/unknown) → dodge left
         _escape_phase = "Dodge: steer LEFT"
         steer_left(settle=1.2)
+        time.sleep(2.0)
 
         _escape_phase = "Dodge: steer RIGHT"
         steer_right(settle=1.2)
+        time.sleep(2.0)
 
     _escape_phase = "Centring"
     steer_centre(settle=0.8)
@@ -373,6 +377,51 @@ def draw_house(x, y, scale):
     canvas.create_rectangle(x-18*scale, y-32*scale, x-5*scale, y-20*scale,
                             fill="#fde68a", outline="")
 
+def _draw_caution_signal(status, color):
+    """Draw a flashing caution triangle with LEFT/RIGHT arrow inside the nav view
+    whenever an object is detected on a side. Uses a blink driven by time."""
+    with _frame_lock:
+        side = latest_object_side
+
+    if side not in ("LEFT", "RIGHT"):
+        return
+
+    # Blink: visible for 0.5 s, hidden for 0.3 s
+    blink_period = 0.8
+    blink_on     = 0.5
+    visible      = (time.time() % blink_period) < blink_on
+    if not visible:
+        return
+
+    warn_color  = "#fbbf24"   # amber
+    arrow_color = "#020711"   # dark fill for arrow on triangle
+
+    if side == "LEFT":
+        # Triangle on the left side of the road view
+        tx, ty = 420, 530     # tip of triangle (apex up)
+        label  = "◀ CAUTION"
+        lx     = 345          # horizontal position of label
+    else:
+        tx, ty = 980, 530
+        label  = "CAUTION ▶"
+        lx     = 905
+
+    # Triangle body (equilateral, pointing up)
+    half = 32
+    canvas.create_polygon(
+        tx,        ty - 40,    # apex
+        tx - half, ty + 22,    # bottom-left
+        tx + half, ty + 22,    # bottom-right
+        fill=warn_color, outline="#7c3c00", width=2
+    )
+    # Exclamation mark inside
+    canvas.create_text(tx, ty - 8,  text="!",  fill="#020711", font=("Arial", 22, "bold"))
+
+    # Direction label below the triangle
+    canvas.create_text(tx, ty + 38, text=f"OBJECT {side}",
+                       fill=warn_color, font=("Arial", 10, "bold"))
+
+
 def draw_navigation_view(moving, speed_level, color, status):
     global road_offset, side_offset
     draw_panel(320, 115, 1080, 705, "AUTONOMOUS NAVIGATION")
@@ -415,6 +464,12 @@ def draw_navigation_view(moving, speed_level, color, status):
                           fill="#ef4444",stipple="gray50",outline="#ef4444",width=1)
     canvas.create_text(700,355,text=status+" ZONE",fill=color,font=("Arial",18,"bold"))
     draw_car(700,590)
+
+    # ── Caution signal: object side indicator ──
+    # Shown whenever an object is detected on LEFT or RIGHT (not during manoeuvre)
+    if not _maneuvering:
+        _draw_caution_signal(status, color)
+
     if moving:
         if speed_level == "FAST":  road_offset += 35; side_offset += 48
         elif speed_level == "SLOW":road_offset += 12; side_offset += 18
