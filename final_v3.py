@@ -78,14 +78,12 @@ def _set_motors(a_dir, b_dir, duty):
     pwma.ChangeDutyCycle(duty)
     pwmb.ChangeDutyCycle(duty)
 
-def apply_speed(speed_level, object_side=None):
-    """Drive motors. When a LEFT/RIGHT object is detected, cap speed:
-       FAST → 50%,  SLOW → 25%.  CENTRE/None uses normal speeds."""
-    side_detected = object_side in ("LEFT", "RIGHT")
+def apply_speed(speed_level):
+    """Fixed duty cycle map:  FAST → 50%,  SLOW → 25%,  STOP → 0%."""
     if speed_level == 'FAST':
-        _set_motors('fwd', 'fwd', 50 if side_detected else 100)
+        _set_motors('fwd', 'fwd', 50)
     elif speed_level == 'SLOW':
-        _set_motors('fwd', 'fwd', 25 if side_detected else 50)
+        _set_motors('fwd', 'fwd', 25)
     else:
         _set_motors('stop', 'stop', 0)
 
@@ -138,7 +136,7 @@ def _reverse_sequence():
 
     _escape_phase = "Reversing..."
     steer_centre(settle=0.3)
-    _set_motors('rev', 'rev', 100)
+    _set_motors('rev', 'rev', 25)   # reverse at 25%
     time.sleep(3.0)
     _set_motors('stop', 'stop', 0)
 
@@ -546,11 +544,7 @@ def draw_dashboard(frame, detected_names, object_side, distance,
                    "FAST"  if speed == 60  else \
                    "SLOW"  if speed == 25  else "STOP"
 
-    side_detected = object_side in ("LEFT", "RIGHT")
-    display_speed = (50 if _maneuvering else
-                     50 if (speed == 60 and side_detected) else
-                     25 if (speed == 25 and side_detected) else
-                     speed)
+    display_speed = 25 if _maneuvering else speed
 
     canvas.create_rectangle(35,125,295,725,fill="#06111f",outline="#164e63",width=2)
     canvas.create_text(165,175,text="SPEED",fill="#e5e7eb",font=("Arial",14,"bold"))
@@ -639,7 +633,7 @@ def update():
 
     # Motor control
     if not _maneuvering:
-        apply_speed(speed_level, object_side)
+        apply_speed(speed_level)
 
     draw_dashboard(frame, detected_names, object_side, distance,
                    status, color, message, speed, speed_level)
