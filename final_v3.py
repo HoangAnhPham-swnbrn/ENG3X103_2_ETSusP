@@ -78,11 +78,14 @@ def _set_motors(a_dir, b_dir, duty):
     pwma.ChangeDutyCycle(duty)
     pwmb.ChangeDutyCycle(duty)
 
-def apply_speed(speed_level):
+def apply_speed(speed_level, object_side=None):
+    """Drive motors. When a LEFT/RIGHT object is detected, cap speed:
+       FAST → 50%,  SLOW → 25%.  CENTRE/None uses normal speeds."""
+    side_detected = object_side in ("LEFT", "RIGHT")
     if speed_level == 'FAST':
-        _set_motors('fwd', 'fwd', 100)
+        _set_motors('fwd', 'fwd', 50 if side_detected else 100)
     elif speed_level == 'SLOW':
-        _set_motors('fwd', 'fwd', 50)
+        _set_motors('fwd', 'fwd', 25 if side_detected else 50)
     else:
         _set_motors('stop', 'stop', 0)
 
@@ -114,17 +117,17 @@ def _dodge_sequence(side):
 
         _escape_phase = "Dodge: steer LEFT"
         steer_left(settle=1.2)
-        time.sleep(2.0)
+        time.sleep(1.0)
 
     else:
         # Object right (or centre/unknown) → dodge left
         _escape_phase = "Dodge: steer LEFT"
         steer_left(settle=1.2)
-        time.sleep(2.0)
+        time.sleep(1.0)
 
         _escape_phase = "Dodge: steer RIGHT"
         steer_right(settle=1.2)
-        time.sleep(2.0)
+        time.sleep(1.0)
 
     _escape_phase = "Centring"
     steer_centre(settle=0.8)
@@ -295,6 +298,7 @@ road_offset   = 0
 side_offset   = 0
 stop_until    = 0
 stopped_since = None
+centre_since  = None   # when object first detected at CENTRE (for 5 s reverse)
 _maneuvering  = False
 camera_img    = None
 
@@ -557,11 +561,16 @@ def draw_dashboard(frame, detected_names, object_side, distance,
                    "FAST"  if speed == 60  else \
                    "SLOW"  if speed == 25  else "STOP"
 
-    # Left gauge
+    # Left gauge — show actual motor duty as the displayed speed
+    side_detected = object_side in ("LEFT", "RIGHT")
+    display_speed = (50 if _maneuvering else
+                     50 if (speed == 60 and side_detected) else
+                     25 if (speed == 25 and side_detected) else
+                     speed)
     canvas.create_rectangle(35,125,295,725,fill="#06111f",outline="#164e63",width=2)
     canvas.create_text(165,175,text="SPEED",fill="#e5e7eb",font=("Arial",14,"bold"))
     draw_vertical_gauge(cx=165,cy=390,rx=95,ry=175,
-                        value=50 if _maneuvering else speed, max_value=100,
+                        value=display_speed, max_value=100,
                         title="DRIVE MODE",unit="km/h",
                         color=gauge_color,subtitle=spd_label)
     canvas.create_text(165,675,text="AUTONOMOUS",fill="#38bdf8",font=("Arial",13,"bold"))
@@ -588,7 +597,7 @@ def draw_dashboard(frame, detected_names, object_side, distance,
 # MAIN UPDATE LOOP
 # ─────────────────────────────────────────────
 def update():
-    global stop_until, stopped_since, _maneuvering
+    global stop_until, stopped_since, centre_since, _maneuvering
 
     now      = time.time()
     distance = get_distance()
@@ -607,7 +616,29 @@ def update():
 
     status, color, message, speed, speed_level = get_status(distance, person, forced_stop)
 
-    # ── Manoeuvre trigger ─────────────────────
+    # ── Centre-object reverse timer ───────────────
+    # If object is CENTRE and vehicle is stopped, reverse at 25% after 5 s
+    if not _maneuvering:
+        if object_side == "CENTRE" and speed_level == "STOP":
+            if centre_since is None:
+                centre_since = now
+            elif now - centre_since >= 5.0:
+                _maneuvering = True
+                centre_since = None
+                def _centre_reverse():
+                    global _escape_phase, _maneuvering
+                    _escape_phase = "Reversing..."
+                    steer_centre(settle=0.3)
+                    _set_motors('rev', 'rev', 25)
+                    time.sleep(3.0)
+                    _set_motors('stop', 'stop', 0)
+                    _escape_phase = ""
+                    _maneuvering  = False
+                threading.Thread(target=_centre_reverse, daemon=True).start()
+        else:
+            centre_since = None   # reset if side changes or vehicle moves
+
+    # ── Manoeuvre trigger ─────────────────────────
     if not _maneuvering:
         if speed_level == "STOP":
             if stopped_since is None:
@@ -615,12 +646,11 @@ def update():
             else:
                 elapsed = now - stopped_since
 
-                # Primary: YOLO side dodge (triggers as soon as object detected with side)
+                # Primary: YOLO side dodge
                 if object_side in ("LEFT", "RIGHT") and elapsed >= 1.0:
-                    # Small 1 s delay so we have a stable side reading
                     _maneuvering  = True
                     stopped_since = None
-                    captured_side = object_side      # capture before thread reads it
+                    captured_side = object_side
                     threading.Thread(
                         target=_dodge_sequence,
                         args=(captured_side,),
@@ -637,7 +667,7 @@ def update():
 
     # Motor control (manoeuvre threads drive motors themselves)
     if not _maneuvering:
-        apply_speed(speed_level)
+        apply_speed(speed_level, object_side)
 
     draw_dashboard(frame, detected_names, object_side, distance,
                    status, color, message, speed, speed_level)
