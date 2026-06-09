@@ -96,38 +96,34 @@ def apply_speed(speed_level, object_side=None):
 # DODGE (triggered by object side from YOLO):
 #   Object on LEFT  → steer RIGHT → steer LEFT → centre
 #   Object on RIGHT → steer LEFT  → steer RIGHT → centre
-#   Object CENTRE / unknown → same as RIGHT dodge (default)
 #
-# REVERSE (fallback after 10 s stopped):
-#   Reverse straight at 100% for 3 s → centre
+# CENTRE REVERSE (object centre for 5 s):
+#   Reverse at 25% for 3 s → centre
+#
+# FALLBACK REVERSE (stopped 10 s, no clear side):
+#   Reverse at 100% for 3 s → centre
 # ─────────────────────────────────────────────
-_escape_phase = ""   # shown live on dashboard
+_escape_phase = ""
 _maneuvering  = False
 
 
 def _dodge_sequence(side):
-    """Steer to dodge based on which side the object is on. Motors stay stopped."""
+    """Steer to dodge based on which side the object is on. No inter-step delays."""
     global _escape_phase, _maneuvering
 
     if side == "LEFT":
-        # Object left → dodge right
         _escape_phase = "Dodge: steer RIGHT"
         steer_right(settle=1.2)
-        time.sleep(2.0)
 
         _escape_phase = "Dodge: steer LEFT"
         steer_left(settle=1.2)
-        time.sleep(1.0)
 
     else:
-        # Object right (or centre/unknown) → dodge left
         _escape_phase = "Dodge: steer LEFT"
         steer_left(settle=1.2)
-        time.sleep(1.0)
 
         _escape_phase = "Dodge: steer RIGHT"
         steer_right(settle=1.2)
-        time.sleep(1.0)
 
     _escape_phase = "Centring"
     steer_centre(settle=0.8)
@@ -137,7 +133,7 @@ def _dodge_sequence(side):
 
 
 def _reverse_sequence():
-    """Fallback: reverse straight for 3 s then stop."""
+    """Fallback: reverse straight at 100% for 3 s then stop."""
     global _escape_phase, _maneuvering
 
     _escape_phase = "Reversing..."
@@ -148,6 +144,20 @@ def _reverse_sequence():
 
     _escape_phase = "Centring"
     steer_centre(settle=0.5)
+
+    _escape_phase = ""
+    _maneuvering  = False
+
+
+def _centre_reverse():
+    """Centre-object fallback: reverse at 25% for 3 s then stop."""
+    global _escape_phase, _maneuvering
+
+    _escape_phase = "Reversing..."
+    steer_centre(settle=0.3)
+    _set_motors('rev', 'rev', 25)
+    time.sleep(3.0)
+    _set_motors('stop', 'stop', 0)
 
     _escape_phase = ""
     _maneuvering  = False
@@ -217,11 +227,11 @@ _frame_lock           = threading.Lock()
 latest_frame          = None
 latest_person         = False
 latest_detected_names = "None"
-latest_object_side    = None    # "LEFT" | "CENTRE" | "RIGHT" | None
+latest_object_side    = None
 
 
 def _classify_side(x1, x2):
-    cx = (x1 + x2) // 2
+    cx  = (x1 + x2) // 2
     mid = FRAME_W // 2
     if cx < mid - CENTRE_DEADZONE:
         return "LEFT"
@@ -242,7 +252,6 @@ def _camera_loop():
         names  = []
         sides  = []
 
-        # Faint deadzone guide lines
         mid = FRAME_W // 2
         cv2.line(frame, (mid - CENTRE_DEADZONE, 0), (mid - CENTRE_DEADZONE, FRAME_H), (80,80,80), 1)
         cv2.line(frame, (mid + CENTRE_DEADZONE, 0), (mid + CENTRE_DEADZONE, FRAME_H), (80,80,80), 1)
@@ -264,7 +273,6 @@ def _camera_loop():
                                 (x1, y1-8), cv2.FONT_HERSHEY_SIMPLEX, 0.40, COLORS[cls], 1)
                     cv2.circle(frame, ((x1+x2)//2,(y1+y2)//2), 4, COLORS[cls], -1)
 
-        # Dominant side: prefer LEFT/RIGHT over CENTRE
         if sides:
             non_centre = [s for s in sides if s != "CENTRE"]
             dominant   = non_centre[0] if non_centre else "CENTRE"
@@ -298,7 +306,7 @@ road_offset   = 0
 side_offset   = 0
 stop_until    = 0
 stopped_since = None
-centre_since  = None   # when object first detected at CENTRE (for 5 s reverse)
+centre_since  = None
 _maneuvering  = False
 camera_img    = None
 
@@ -382,48 +390,30 @@ def draw_house(x, y, scale):
                             fill="#fde68a", outline="")
 
 def _draw_caution_signal(status, color):
-    """Draw a flashing caution triangle with LEFT/RIGHT arrow inside the nav view
-    whenever an object is detected on a side. Uses a blink driven by time."""
+    """Blinking caution triangle on left or right of nav view when object detected on that side."""
     with _frame_lock:
         side = latest_object_side
 
     if side not in ("LEFT", "RIGHT"):
         return
 
-    # Blink: visible for 0.5 s, hidden for 0.3 s
     blink_period = 0.8
     blink_on     = 0.5
-    visible      = (time.time() % blink_period) < blink_on
-    if not visible:
+    if (time.time() % blink_period) >= blink_on:
         return
 
-    warn_color  = "#fbbf24"   # amber
-    arrow_color = "#020711"   # dark fill for arrow on triangle
+    warn_color = "#fbbf24"
+    tx, ty     = (420, 530) if side == "LEFT" else (980, 530)
+    half       = 32
 
-    if side == "LEFT":
-        # Triangle on the left side of the road view
-        tx, ty = 420, 530     # tip of triangle (apex up)
-        label  = "◀ CAUTION"
-        lx     = 345          # horizontal position of label
-    else:
-        tx, ty = 980, 530
-        label  = "CAUTION ▶"
-        lx     = 905
-
-    # Triangle body (equilateral, pointing up)
-    half = 32
     canvas.create_polygon(
-        tx,        ty - 40,    # apex
-        tx - half, ty + 22,    # bottom-left
-        tx + half, ty + 22,    # bottom-right
+        tx,        ty - 40,
+        tx - half, ty + 22,
+        tx + half, ty + 22,
         fill=warn_color, outline="#7c3c00", width=2
     )
-    # Exclamation mark inside
-    canvas.create_text(tx, ty - 8,  text="!",  fill="#020711", font=("Arial", 22, "bold"))
-
-    # Direction label below the triangle
-    canvas.create_text(tx, ty + 38, text=f"OBJECT {side}",
-                       fill=warn_color, font=("Arial", 10, "bold"))
+    canvas.create_text(tx, ty - 8,  text="!",             fill="#020711", font=("Arial", 22, "bold"))
+    canvas.create_text(tx, ty + 38, text=f"OBJECT {side}", fill=warn_color, font=("Arial", 10, "bold"))
 
 
 def draw_navigation_view(moving, speed_level, color, status):
@@ -469,8 +459,6 @@ def draw_navigation_view(moving, speed_level, color, status):
     canvas.create_text(700,355,text=status+" ZONE",fill=color,font=("Arial",18,"bold"))
     draw_car(700,590)
 
-    # ── Caution signal: object side indicator ──
-    # Shown whenever an object is detected on LEFT or RIGHT (not during manoeuvre)
     if not _maneuvering:
         _draw_caution_signal(status, color)
 
@@ -517,7 +505,6 @@ def draw_bottom_status(status, color, message, detected_names, object_side):
 
     canvas.create_rectangle(360,640,1040,700,fill="#020711",outline="#38bdf8",width=2)
 
-    # Detected object + side badge
     canvas.create_text(400,670,text="◎",fill="#86efac",font=("Arial",28,"bold"))
     canvas.create_text(445,660,text="DETECTED OBJECT",fill="#cbd5e1",
                        font=("Arial",10,"bold"),anchor="w")
@@ -530,7 +517,6 @@ def draw_bottom_status(status, color, message, detected_names, object_side):
 
     canvas.create_line(640,650,640,690,fill="#1e293b")
 
-    # Decision
     canvas.create_text(680,670,text="⬟",fill="#f59e0b",font=("Arial",26,"bold"))
     canvas.create_text(720,660,text="DECISION",fill="#cbd5e1",
                        font=("Arial",10,"bold"),anchor="w")
@@ -539,7 +525,6 @@ def draw_bottom_status(status, color, message, detected_names, object_side):
 
     canvas.create_line(820,650,820,690,fill="#1e293b")
 
-    # Status
     canvas.create_text(860,670,text="⌘",fill="#38bdf8",font=("Arial",26,"bold"))
     canvas.create_text(900,660,text="STATUS",fill="#cbd5e1",
                        font=("Arial",10,"bold"),anchor="w")
@@ -561,12 +546,12 @@ def draw_dashboard(frame, detected_names, object_side, distance,
                    "FAST"  if speed == 60  else \
                    "SLOW"  if speed == 25  else "STOP"
 
-    # Left gauge — show actual motor duty as the displayed speed
     side_detected = object_side in ("LEFT", "RIGHT")
     display_speed = (50 if _maneuvering else
                      50 if (speed == 60 and side_detected) else
                      25 if (speed == 25 and side_detected) else
                      speed)
+
     canvas.create_rectangle(35,125,295,725,fill="#06111f",outline="#164e63",width=2)
     canvas.create_text(165,175,text="SPEED",fill="#e5e7eb",font=("Arial",14,"bold"))
     draw_vertical_gauge(cx=165,cy=390,rx=95,ry=175,
@@ -579,7 +564,6 @@ def draw_dashboard(frame, detected_names, object_side, distance,
     draw_camera_feed(frame)
     draw_bottom_status(status, color, message, detected_names, object_side)
 
-    # Right gauge
     canvas.create_rectangle(1105,125,1365,725,fill="#06111f",outline="#164e63",width=2)
     canvas.create_text(1235,175,text="DISTANCE",fill="#e5e7eb",font=("Arial",14,"bold"))
     display_dist = 0 if distance is None else int(distance)
@@ -616,8 +600,7 @@ def update():
 
     status, color, message, speed, speed_level = get_status(distance, person, forced_stop)
 
-    # ── Centre-object reverse timer ───────────────
-    # If object is CENTRE and vehicle is stopped, reverse at 25% after 5 s
+    # ── Centre-object reverse (5 s) ───────────────
     if not _maneuvering:
         if object_side == "CENTRE" and speed_level == "STOP":
             if centre_since is None:
@@ -625,20 +608,11 @@ def update():
             elif now - centre_since >= 5.0:
                 _maneuvering = True
                 centre_since = None
-                def _centre_reverse():
-                    global _escape_phase, _maneuvering
-                    _escape_phase = "Reversing..."
-                    steer_centre(settle=0.3)
-                    _set_motors('rev', 'rev', 25)
-                    time.sleep(3.0)
-                    _set_motors('stop', 'stop', 0)
-                    _escape_phase = ""
-                    _maneuvering  = False
                 threading.Thread(target=_centre_reverse, daemon=True).start()
         else:
-            centre_since = None   # reset if side changes or vehicle moves
+            centre_since = None
 
-    # ── Manoeuvre trigger ─────────────────────────
+    # ── Side dodge / fallback reverse ────────────
     if not _maneuvering:
         if speed_level == "STOP":
             if stopped_since is None:
@@ -646,7 +620,6 @@ def update():
             else:
                 elapsed = now - stopped_since
 
-                # Primary: YOLO side dodge
                 if object_side in ("LEFT", "RIGHT") and elapsed >= 1.0:
                     _maneuvering  = True
                     stopped_since = None
@@ -657,15 +630,14 @@ def update():
                         daemon=True
                     ).start()
 
-                # Fallback: stopped 10 s with no clear side → reverse
                 elif elapsed >= STOP_TOO_LONG:
                     _maneuvering  = True
                     stopped_since = None
                     threading.Thread(target=_reverse_sequence, daemon=True).start()
         else:
-            stopped_since = None   # moving again — reset timer
+            stopped_since = None
 
-    # Motor control (manoeuvre threads drive motors themselves)
+    # Motor control
     if not _maneuvering:
         apply_speed(speed_level, object_side)
 
